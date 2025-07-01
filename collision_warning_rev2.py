@@ -1,470 +1,100 @@
 
-"""
-import cv2
-import numpy as np
-from ultralytics import YOLO
-import time
-
-# YOLOv8 모델 로드 및 초기화
-model = YOLO('/home/hkit/Desktop/model test result/yolov8_custom14_test 7_n_250625/weights/best.pt')
-model.eval()    # 모델을 테스트 모드로 추론 (학습용 x)
-model.fuse()    # 모델 최적화 ->속도 향상 -> CPU일 때 향상률 ↑
-_ = model(np.zeros((360, 640, 3), dtype=np.uint8))  # 워밍업
-
-# 동영상 로드
-cap = cv2.VideoCapture('/home/hkit/Downloads/Driving Downtown Seoul.mp4') # 동영상 열기
-resize_width, resize_height = 640, 360  # 사이즈 변환
-fps = cap.get(cv2.CAP_PROP_FPS) # 동영상 fps값 추출 (fps = 24)
-video_length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))  # 동영상 전체 프레임 수
-delay = int(1000 // (fps * 8))  # (fps*8)로 동영상 속도 개선
-
-# 클래스 이름 정의
-class_names = {
-    0: "vehicle", 1: "big vehicle", 4: "bike",
-    5: "human", 6: "animals", 7: "obstacles"
-}
-
-# 전역 변수로 이전 프레임의 차선 정보를 저장
-prev_left_fit_global = None
-prev_right_fit_global = None
-
-
-
-
-# --- START: CAMERA-SPECIFIC FOCAL LENGTH CALCULATION ---
-# Sony A7M4 + 35mm F1.4 GM specific parameters
-# Sensor width for Sony A7M4 (full-frame) in mm
-camera_sensor_width_mm = 35.9 # Approximate width of full-frame sensor
-lens_focal_length_mm = 35.0 # Focal length of the Sony 35mm F1.4 GM lens
-
-# Calculate focal length in pixels based on the resized image width
-# This assumes the lens focal length is for the horizontal field of view
-focal_length_pixels = (lens_focal_length_mm * resize_width) / camera_sensor_width_mm
-# Using a more descriptive variable name
-focal_length = focal_length_pixels
-print(f"Calculated focal_length for Sony A7M4 35mm lens at {resize_width}x{resize_height}: {focal_length:.2f} pixels")
-# --- END: CAMERA-SPECIFIC FOCAL LENGTH CALCULATION ---
-
-# 차량의 실제 크기 (미터 단위) - vehicle과 big vehicle 구분
-# 일반적인 차량의 실제 너비를 고려하여 값 조정 (예시)
-# 승용차 대략 1.7m ~ 2.0m, 대형 차량 2.5m 이상
-vehicle_real_length = 1.8  # 일반 차량 너비 (미터) - 이전 1.5에서 조정
-big_vehicle_real_length = 2.5  # 대형 차량 너비 (미터) - 이전 4.0에서 조정
-
-# 박스가 ROI 안에 일정 비율 이상 들어갔는지 확인하는 함수
-def inside_roi(box, mask, threshold):   
-    x1, y1, x2, y2 = map(int, box)
-    roi_box = mask[y1:y2, x1:x2]
-    if roi_box.size == 0:
-        return False
-    inside = np.count_nonzero(roi_box == 255)
-    ratio = inside / roi_box.size
-    return ratio >= threshold
-
-# --- START: create_trapezoid_roi 함수 수정 ---
-# 차선 기반으로 사다리꼴 ROI 생성
-def create_trapezoid_roi(frame, y_bottom, y_top):
-    height, width = frame.shape[:2]
-
-    # 1. 영상 전처리: grayscale -> Gaussian Blur (커널 키움) -> CLAHE -> Canny Edge Detection (파라미터 튜닝)
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    # Gaussian Blur 커널 크기 증가 (노이즈 사전 제거 강화)
-    blur = cv2.GaussianBlur(gray, (9, 9), 0) # (5,5)에서 (7,7)로 변경
-
-    # CLAHE 적용
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)) # clipLimit 미세 조정 (2.0에서 2.5로)
-    clahe_output = clahe.apply(blur)
-
-    # Canny Edge Detection 파라미터 튜닝 (노이즈 감소, 강한 에지만 추출)
-    # 기존 (50, 150)에서 (70, 200)으로 변경 (이전 권장 사항 반영)
-    # 필요시 (80, 220) 또는 (100, 250) 등으로 추가 튜닝
-    edges = cv2.Canny(clahe_output, 80, 220)
-
-    # 디버깅을 위한 중간 결과 이미지 표시 (주석 해제하여 확인)
-    # cv2.imshow("Original Gray", gray)
-    # cv2.imshow("Blurred Image", blur)
-    cv2.imshow("CLAHE Output", clahe_output) # CLAHE 적용 후 이미지
-    cv2.imshow("Canny Edges", edges)       # Canny 적용 후 에지 이미지
-
-    # ROI 마스크 생성 (차선 검출 영역 제한)
-    # 이 ROI는 Hough 변환이 차선을 찾는 영역을 제한하는 데 사용됩니다.
-    mask = np.zeros_like(edges)
-    # 초기 ROI 영역을 좀 더 넓게 설정하여 차선이 놓이는 범위에 유연성 확보
-    # width // 2 - 60, width // 2 + 60 에서 변경
-    roi_vertices = np.array([[
-        (90, height),                    # Bottom-left (영상 하단 좌측 끝)
-        (width // 2 - 50, height // 2 + 40), # Top-left (윗부분 좌측 끝점 조정)
-        (width // 2 + 50, height // 2 + 40), # Top-right (윗부분 우측 끝점 조정)
-        (width - 60, height)                 # Bottom-right (영상 하단 우측 끝)
-    ]], dtype=np.int32)
-    cv2.fillPoly(mask, roi_vertices, 255)
-    masked_edges = cv2.bitwise_and(edges, mask) # ROI 내의 에지만 남김
-
-    cv2.imshow("Masked Edges for Hough", masked_edges) # Hough 변환 입력 이미지 확인
-
-    # 허프 변환 - 왼쪽 기울기 <0, 오른쪽 기울기 >0로 직선을 분류
-    # HoughLinesP 파라미터 튜닝
-    # threshold, minLineLength, maxLineGap 조정 (비디오에 따라 미세 조정 필요)
-    lines = cv2.HoughLinesP(masked_edges, 1, np.pi / 180, 40, # threshold: 50 -> 40 (더 많은 선 검출 시도)
-                            minLineLength=50, # minLineLength: 40 -> 50 (더 긴 선만 유효)
-                            maxLineGap=150)    # maxLineGap: 100 -> 80 (선 끊김 허용 범위 조절)
-
-    left_lines, right_lines = [], []
-    if lines is not None:
-        for x1, y1, x2, y2 in lines[:, 0]:
-            # 수직선에 대한 0으로 나누기 오류 방지 (x2 - x1이 매우 작을 때)
-            slope = (y2 - y1) / (x2 - x1 + 1e-6) 
-            # 차선의 기울기 범위를 조금 더 엄격하게 설정 (필요시 조절)
-            if -1.0 < slope < -0.1: # 왼쪽 차선 기울기 범위 (-0.5에서 확장/조정)
-                left_lines.append((x1, y1, x2, y2))
-            elif 0.1 < slope < 1.0: # 오른쪽 차선 기울기 범위 (0.5에서 확장/조정)
-                right_lines.append((x1, y1, x2, y2))
-
-
-
-
-        # 디버깅: 검출된 선들을 영상에 그려서 확인
-    debug_frame_lines = frame.copy() # 원본 프레임을 복사하여 그릴 것
-    if lines is not None:
-        for x1, y1, x2, y2 in lines[:, 0]:
-            cv2.line(debug_frame_lines, (x1, y1), (x2, y2), (0, 255, 255), 1) # 모든 허프 선 (노랑)
-    if left_lines:
-        for x1, y1, x2, y2 in left_lines:
-            cv2.line(debug_frame_lines, (x1, y1), (x2, y2), (255, 0, 0), 2) # 왼쪽 차선으로 분류된 선 (파랑)
-    if right_lines:
-        for x1, y1, x2, y2 in right_lines:
-            cv2.line(debug_frame_lines, (x1, y1), (x2, y2), (0, 0, 255), 2) # 오른쪽 차선으로 분류된 선 (빨강)
-    cv2.imshow("Detected and Classified Hough Lines", debug_frame_lines)
-
-
-
-    def average_line(lines):
-        if not lines:
-            return None
-        x, y = [], []
-        for x1, y1, x2, y2 in lines:
-            x += [x1, x2]
-            y += [y1, y2]
-        # numpy.linalg.LinAlgError: SVD did not converge in Linear Least Squares 오류 방지
-        # 최소 2개의 점이 있어야 polyfit이 가능
-        if len(y) < 2:
-            return None
-        return np.polyfit(y, x, deg=1)  # x = ay + b
-
-    left_fit = average_line(left_lines)
-    right_fit = average_line(right_lines)
-
-
-    # 이전 프레임의 차선 정보를 활용하여 ROI 안정화 (간단한 이동 평균)
-    global prev_left_fit_global, prev_right_fit_global # <<--- 이 줄 추가!    
-
-    # 이전 프레임의 차선 정보를 활용하여 ROI 안정화 (간단한 이동 평균)
-    # 이 기능을 활성화하려면 create_trapezoid_roi 함수 외부에 전역 변수 필요
-    # 예: prev_left_fit_global, prev_right_fit_global
-    # 여기서는 함수의 복잡도를 높이지 않기 위해 일단 주석 처리합니다.
-    # 만약 ROI가 여전히 불안정하다면 이 로직을 추가하는 것을 고려하세요.
-    # global prev_left_fit_global, prev_right_fit_global
-    alpha = 0.7 # 새 값 반영 비율
-    if left_fit is not None:
-        if prev_left_fit_global is not None:
-            left_fit = alpha * left_fit + (1 - alpha) * prev_left_fit_global
-        prev_left_fit_global = left_fit
-    if right_fit is not None:
-        if prev_right_fit_global is not None:
-            right_fit = alpha * right_fit + (1 - alpha) * prev_right_fit_global
-        prev_right_fit_global = right_fit
-
-
-    if left_fit is None or right_fit is None:
-        # 두 차선 중 하나라도 감지되지 않으면 None 반환하여 ROI 생성 건너뛰기
-        # 또는 이전 프레임의 ROI를 재활용하는 로직 추가 가능
-        return None
-    
-
-    # ROI 꼭짓점 계산
-    lx1 = int(np.polyval(left_fit, y_bottom))
-    lx2 = int(np.polyval(left_fit, y_top))
-    rx1 = int(np.polyval(right_fit, y_bottom))
-    rx2 = int(np.polyval(right_fit, y_top))
-
-   # 디버깅: 최종 피팅된 차선으로 ROI가 어떻게 생성되는지 확인
-    # 이 부분은 ROI 꼭짓점 계산 바로 아래에 추가하세요.
-    if left_fit is not None and right_fit is not None:
-        debug_frame_roi_fit = frame.copy()
-        cv2.line(debug_frame_roi_fit, (lx1, y_bottom), (lx2, y_top), (255, 0, 0), 2) # 파랑 (왼쪽 최종 차선)
-        cv2.line(debug_frame_roi_fit, (rx1, y_bottom), (rx2, y_top), (0, 0, 255), 2) # 빨강 (오른쪽 최종 차선)
-        cv2.imshow("Final Fitted Lines for ROI Calculation", debug_frame_roi_fit)
-
-
-
-
-    # ROI의 x 좌표가 이미지 범위를 벗어나지 않도록 클리핑 (중요!)
-    lx1 = np.clip(lx1, 0, width)
-    lx2 = np.clip(lx2, 0, width)
-    rx1 = np.clip(rx1, 0, width)
-    rx2 = np.clip(rx2, 0, width)
-    
-    # 검출된 차선이 너무 가깝거나 교차하는 경우, ROI 생성을 피하거나 조정
-    # (예: lx1 >= rx1 또는 lx2 >= rx2 인 경우)
-    if lx1 >= rx1 or lx2 >= rx2:
-        print("Warning: Detected lanes are crossing or too close for ROI creation. Skipping ROI.")
-        return None
-
-
-    # 디버깅: 피팅된 차선으로 ROI가 어떻게 생성되는지 확인 (옵션)
-    # debug_frame_roi_fit = frame.copy()
-    # cv2.line(debug_frame_roi_fit, (lx1, y_bottom), (lx2, y_top), (255, 0, 0), 2)
-    # cv2.line(debug_frame_roi_fit, (rx1, y_bottom), (rx2, y_top), (0, 0, 255), 2)
-    # cv2.imshow("Fitted Lines for ROI", debug_frame_roi_fit)
-
-
-    return np.array([[
-        (lx1, y_bottom), (lx2, y_top), (rx2, y_top), (rx1, y_bottom)
-    ]], dtype=np.int32)
-# --- END: create_trapezoid_roi 함수 수정 ---
-
-
-# ROI 높이 설정 - 360은 하단값, 뒤의 값은 상단값으로 작을수록 영역이 길어짐.
-danger_bottom, danger_top = 360, 300
-warning_bottom, warning_top = 360, 260
-
-# ROI 별 threshold 설정 - 픽셀 비율로 ROI 영역 침범 시 감지
-danger_threshold = 0.2    
-warning_threshold = 0.3
-
-# 거리 계산 함수
-def calculate_distance(vehicle_screen_width, vehicle_real_length):
-    #차량의 화면 너비와 실제 차량 크기를 비교하여 거리 계산
-    return (focal_length * vehicle_real_length) / vehicle_screen_width
-
-# 트랙바 콜백 함수
-def update_video_position(val):
-    #트랙바 값에 따라 동영상 재생 위치를 업데이트
-    cap.set(cv2.CAP_PROP_POS_FRAMES, val)
-
-# 트랙바 생성
-cv2.namedWindow('YOLOv8 ROI Detection')
-cv2.createTrackbar('Video Position', 'YOLOv8 ROI Detection', 0, video_length - 1, update_video_position)
-
-# FPS 측정을 위한 변수
-prev_frame_time = 0
-new_frame_time = 0
-
-while cap.isOpened():
-
-    # 프레임 읽고 사이즈 조정
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    frame = cv2.resize(frame, (resize_width, resize_height))
-
-    # 빈 마스크 생성
-    mask_danger = np.zeros((resize_height, resize_width), dtype=np.uint8)
-    mask_warning = np.zeros((resize_height, resize_width), dtype=np.uint8)
-
-    # danger ROI 생성
-    danger_roi = create_trapezoid_roi(frame, danger_bottom, danger_top)
-    if danger_roi is not None:
-        cv2.fillPoly(mask_danger, [danger_roi], 255)
-
-    # warning ROI 생성
-    warning_roi = create_trapezoid_roi(frame, warning_bottom, warning_top)
-    if warning_roi is not None:
-        cv2.fillPoly(mask_warning, [warning_roi], 255)
-        # danger ROI와 겹치는 부분 제외 (마스크 빼기)
-        if danger_roi is not None: # danger_roi가 존재할 때만 뺀다
-            danger_mask_for_subtract = np.zeros((resize_height, resize_width), dtype=np.uint8)
-            cv2.fillPoly(danger_mask_for_subtract, [danger_roi], 255)
-            mask_warning = cv2.subtract(mask_warning, danger_mask_for_subtract)
-
-
-    roi_overlay = frame.copy()
-
-    # Danger ROI 테두리: 무조건 먼저 빨간색으로 그림
-    if danger_roi is not None:
-        cv2.polylines(roi_overlay, [danger_roi], isClosed=True, color=(0, 0, 255), thickness=3)
-
-    # Warning ROI 테두리: Danger ROI와 겹치는 부분은 제외하고 노란색으로 그림
-    if warning_roi is not None:
-        if danger_roi is not None:
-            # Warning ROI 마스크 만들기
-            warning_mask_draw = np.zeros((resize_height, resize_width), dtype=np.uint8)
-            cv2.fillPoly(warning_mask_draw, [warning_roi], 255)
-
-            # Danger ROI 마스크 빼기 (겹치는 부분 제거)
-            danger_mask_draw = np.zeros((resize_height, resize_width), dtype=np.uint8)
-            cv2.fillPoly(danger_mask_draw, [danger_roi], 255)
-
-            # Warning 마스크에서 Danger 부분 제거
-            warning_mask_draw = cv2.subtract(warning_mask_draw, danger_mask_draw)
-
-            # 남은 Warning 부분의 외곽선 찾아 테두리 그림
-            contours, _ = cv2.findContours(warning_mask_draw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for cnt in contours:
-                cv2.polylines(roi_overlay, [cnt], isClosed=True, color=(0, 255, 255), thickness=3)
-        else:
-            # Danger ROI가 없으면 Warning ROI 전체를 그림
-            cv2.polylines(roi_overlay, [warning_roi], isClosed=True, color=(0, 255, 255), thickness=3)
-
-    # 객체 탐지
-    results = model(frame)
-    boxes = results[0].boxes.xyxy.cpu().numpy()
-    classes = results[0].boxes.cls.cpu().numpy()
-
-    for box, class_id in zip(boxes, classes):
-        class_id = int(class_id)
-        if class_id not in class_names:
-            continue
-
-        x1, y1, x2, y2 = [int(c) for c in box]
-        class_name = class_names[class_id]
-
-        # 객체 탐지 시 색 지정 - danger, warning 외
-        if inside_roi(box, mask_danger, danger_threshold):
-            color = (0, 0, 255) # 빨강 (Danger)
-        elif inside_roi(box, mask_warning, warning_threshold):
-            color = (0, 255, 255) # 노랑 (Warning)
-        else:
-            color = (0, 255, 0) # 초록 (정상)
-
-        # 차량의 화면 상 너비 계산
-        vehicle_screen_width = x2 - x1
-
-        # 거리 계산 (차량에 대해서만 계산)
-        if class_id == 0 or class_id == 1:  # big vehicle과 vehicle에 대해서만 거리 계산
-            vehicle_real_length_used = vehicle_real_length if class_id == 0 else big_vehicle_real_length 
-            
-            # 픽셀 너비가 0이 되는 경우 방지
-            if vehicle_screen_width > 0:
-                distance = calculate_distance(vehicle_screen_width, vehicle_real_length_used)
-            else:
-                distance = float('inf') # 화면 너비가 0이면 거리를 무한대로 설정
-
-            # 거리 표시
-            cv2.putText(frame, f"Dis: {distance:.2f}[m]", (x1, y2 + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-
-        # 바운딩 박스, 클래스별 라벨 표시
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, class_name, (x1, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-
-    # FPS 계산
-    new_frame_time = time.time()  # 현재 시간을 프레임 처리 시간으로 저장
-    fps_value = 1 / (new_frame_time - prev_frame_time)  # FPS 계산
-    prev_frame_time = new_frame_time  # 이전 프레임 시간 업데이트
-
-    # FPS 출력
-    cv2.putText(frame, f"FPS: {fps_value:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-    # 화면 표시
-    overlay = cv2.addWeighted(frame, 1.0, roi_overlay, 0.3, 0)
-    cv2.imshow("YOLOv8 ROI Detection", overlay)
-
-    key = cv2.waitKey(delay) & 0xFF
-    if key == ord('q'):
-        break
-    elif key == 81: # 'Q' 키 (대문자)
-        cap.set(cv2.CAP_PROP_POS_MSEC, cap.get(cv2.CAP_PROP_POS_MSEC) - 5000)
-    elif key == 83: # 'S' 키 (대문자)
-        cap.set(cv2.CAP_PROP_POS_MSEC, cap.get(cv2.CAP_PROP_POS_MSEC) + 5000)
-
-cap.release()
-cv2.destroyAllWindows()
-"""
-
-
-
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 import time
 
-# YOLOv8 모델 로드 및 초기화
+# --- 1. YOLOv8 모델 로드 및 초기화 ---
+# 모델 파일 경로를 당신의 실제 경로로 설정하세요.
 model = YOLO('/home/hkit/Desktop/model test result/yolov8_custom14_test 7_n_250625/weights/best.pt')
-model.eval()    # 모델을 테스트 모드로 추론 (학습용 x)
-model.fuse()    # 모델 최적화 ->속도 향상 -> CPU일 때 향상률 ↑
-_ = model(np.zeros((360, 640, 3), dtype=np.uint8))  # 워밍업
+model.eval()    # 모델을 추론(테스트) 모드로 설정합니다.
+model.fuse()    # 모델 최적화 (CPU 사용 시 속도 향상에 도움).
+_ = model(np.zeros((360, 640, 3), dtype=np.uint8))  # 모델 워밍업 (첫 추론 시간 단축).
 
-# 동영상 로드
-cap = cv2.VideoCapture('/home/hkit/Downloads/Driving Downtown Seoul.mp4') # 동영상 열기
-resize_width, resize_height = 640, 360  # 사이즈 변환
-fps = cap.get(cv2.CAP_PROP_FPS) # 동영상 fps값 추출 (fps = 24)
-video_length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))  # 동영상 전체 프레임 수
-delay = int(1000 // (fps * 8))  # (fps*8)로 동영상 속도 개선
+# --- 2. 동영상 로드 및 초기 설정 ---
+# 동영상 파일 경로를 당신의 실제 경로로 설정하세요.
+cap = cv2.VideoCapture('/home/hkit/Downloads/Driving Downtown Seoul.mp4')
+if not cap.isOpened():
+    print("Error: Could not open video file.")
+    exit() # 동영상 파일을 열 수 없으면 프로그램 종료
 
-# 클래스 이름 정의
+resize_width, resize_height = 640, 360  # 프레임 리사이즈 해상도.
+fps = cap.get(cv2.CAP_PROP_FPS) # 동영상의 원본 FPS 추출.
+video_length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))  # 동영상 전체 프레임 수.
+delay = int(1000 // (fps * 8))  # 동영상 재생 속도 조절 (원본 FPS의 8배 빠르게).
+
+# --- 3. 클래스 이름 정의 (YOLOv8 모델의 클래스에 맞게) ---
 class_names = {
     0: "vehicle", 1: "big vehicle", 4: "bike",
     5: "human", 6: "animals", 7: "obstacles"
 }
 
-# 전역 변수로 이전 프레임의 차선 정보를 저장 (이동 평균용)
+# --- 4. 전역 변수 초기화 ---
+# 이전 프레임의 차선 정보를 저장하여 이동 평균(smoothing)에 사용합니다.
 prev_left_fit_global = None
 prev_right_fit_global = None
 
-# <<< 추가: 화면에 표시될 마지막 유효한 ROI를 저장할 전역 변수 >>>
+# 화면에 표시될 마지막 유효한 ROI(관심 영역)를 저장합니다.
+# 차선 인식이 일시적으로 실패해도 ROI가 화면에서 사라지지 않도록 합니다.
 last_display_danger_roi = None
 last_display_warning_roi = None
 
+# --- 5. 카메라 관련 초점 거리 계산 (거리 추정용) ---
+# Sony A7M4 + 35mm F1.4 GM 렌즈 사양 예시.
+camera_sensor_width_mm = 35.9 # 풀프레임 센서의 대략적인 너비 (mm).
+lens_focal_length_mm = 35.0 # 렌즈의 초점 거리 (mm).
 
-# --- START: CAMERA-SPECIFIC FOCAL LENGTH CALCULATION ---
-# Sony A7M4 + 35mm F1.4 GM specific parameters
-# Sensor width for Sony A7M4 (full-frame) in mm
-camera_sensor_width_mm = 35.9 # Approximate width of full-frame sensor
-lens_focal_length_mm = 35.0 # Focal length of the Sony 35mm F1.4 GM lens
+# 리사이즈된 이미지 너비에 기반한 픽셀 단위 초점 거리 계산.
+# 이는 렌즈 초점 거리가 수평 시야에 대한 것이라고 가정합니다.
+focal_length = (lens_focal_length_mm * resize_width) / camera_sensor_width_mm
+print(f"Calculated focal_length for Sony A7M4 35mm lens at {resize_width}x{resize_height}: {focal_length:.2f} 픽셀")
 
-# Calculate focal length in pixels based on the resized image width
-# This assumes the lens focal length is for the horizontal field of view
-focal_length_pixels = (lens_focal_length_mm * resize_width) / camera_sensor_width_mm
-# Using a more descriptive variable name
-focal_length = focal_length_pixels
-print(f"Calculated focal_length for Sony A7M4 35mm lens at {resize_width}x{resize_height}: {focal_length:.2f} pixels")
-# --- END: CAMERA-SPECIFIC FOCAL LENGTH CALCULATION ---
+# --- 6. 차량의 실제 크기 정의 (미터 단위) ---
+vehicle_real_length = 1.8  # 일반 차량의 실제 너비 (미터).
+big_vehicle_real_length = 2.5  # 대형 차량의 실제 너비 (미터).
 
-# 차량의 실제 크기 (미터 단위) - vehicle과 big vehicle 구분
-# 일반적인 차량의 실제 너비를 고려하여 값 조정 (예시)
-# 승용차 대략 1.7m ~ 2.0m, 대형 차량 2.5m 이상
-vehicle_real_length = 1.8  # 일반 차량 너비 (미터) - 이전 1.5에서 조정
-big_vehicle_real_length = 2.5  # 대형 차량 너비 (미터) - 이전 4.0에서 조정
-
-# 박스가 ROI 안에 일정 비율 이상 들어갔는지 확인하는 함수
-def inside_roi(box, mask, threshold):   
+# --- 7. 유틸리티 함수: 박스가 ROI 안에 일정 비율 이상 들어갔는지 확인 ---
+def inside_roi(box, mask, threshold):
     x1, y1, x2, y2 = map(int, box)
-    roi_box = mask[y1:y2, x1:x2]
-    if roi_box.size == 0:
+    # 박스 영역이 마스크 범위를 벗어나지 않도록 클리핑.
+    y1 = max(0, y1)
+    x1 = max(0, x1)
+    y2 = min(mask.shape[0], y2)
+    x2 = min(mask.shape[1], x2)
+
+    roi_box_region = mask[y1:y2, x1:x2]
+    if roi_box_region.size == 0: # 유효하지 않은 박스 영역일 경우.
         return False
-    inside = np.count_nonzero(roi_box == 255)
-    ratio = inside / roi_box.size
+    # ROI 마스크에서 255 (ROI 영역)인 픽셀 수 계산.
+    inside_pixels = np.count_nonzero(roi_box_region == 255)
+    ratio = inside_pixels / roi_box_region.size
     return ratio >= threshold
 
-# --- START: create_trapezoid_roi 함수 수정 ---
-# 차선 기반으로 사다리꼴 ROI 생성
+# --- 8. 유틸리티 함수: 차선 기반 사다리꼴 ROI 생성 ---
 def create_trapezoid_roi(frame, y_bottom, y_top):
     height, width = frame.shape[:2]
 
     # 1. 영상 전처리: grayscale -> Gaussian Blur (커널 키움) -> CLAHE -> Canny Edge Detection (파라미터 튜닝)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    # --- 디버깅: 그레이스케일 이미지 확인 ---
+    # cv2.imshow("Debug_1_Grayscale", gray)
     
-    # Gaussian Blur 커널 크기 증가 (노이즈 사전 제거 강화)
-    blur = cv2.GaussianBlur(gray, (9, 9), 0)
+    blur = cv2.GaussianBlur(gray, (9, 9), 0) # Gaussian Blur 커널 크기 증가 (노이즈 제거 강화).
+    # --- 디버깅: 블러 처리된 이미지 확인 ---
+    # cv2.imshow("Debug_2_Blurred", blur)
 
-    # CLAHE 적용
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    clahe_output = clahe.apply(blur)
+    clahe_output = clahe.apply(blur) # CLAHE 적용 (국부 대비 향상).
+    # --- 디버깅: CLAHE 적용 이미지 확인 ---
+    # cv2.imshow("Debug_3_CLAHE_Output", clahe_output)
 
-    # Canny Edge Detection 파라미터 튜닝 (노이즈 감소, 강한 에지만 추출)
+    # Canny 엣지 감지 (파라미터 튜닝: 노이즈 감소, 강한 엣지만 추출).
     edges = cv2.Canny(clahe_output, 80, 200)
+    # --- 디버깅: Canny 엣지 이미지 확인 ---
+    cv2.imshow("Debug_4_Canny_Edges", edges)
 
-    # 디버깅을 위한 중간 결과 이미지 표시 (주석 해제하여 확인)
-    # cv2.imshow("Original Gray", gray)
-    # cv2.imshow("Blurred Image", blur)
-    cv2.imshow("CLAHE Output", clahe_output)
-    cv2.imshow("Canny Edges", edges)
-
-    # ROI 마스크 생성 (차선 검출 영역 제한)
+    # 2. 차선 감지를 위한 ROI 마스크 생성:
     # 이 ROI는 Hough 변환이 차선을 찾는 영역을 제한하는 데 사용됩니다.
     mask = np.zeros_like(edges)
     roi_vertices = np.array([[
@@ -474,38 +104,55 @@ def create_trapezoid_roi(frame, y_bottom, y_top):
         (width - 60, height)
     ]], dtype=np.int32)
     cv2.fillPoly(mask, roi_vertices, 255)
-    masked_edges = cv2.bitwise_and(edges, mask) # ROI 내의 에지만 남김
+    masked_edges = cv2.bitwise_and(edges, mask) # ROI 내의 엣지만 남김.
 
-    cv2.imshow("Masked Edges for Hough", masked_edges) # Hough 변환 입력 이미지 확인
+    # --- 디버깅: Hough 변환 입력 이미지 (ROI 마스킹된 엣지) 확인 ---
+    cv2.imshow("Debug_5_Masked_Edges_for_Hough", masked_edges)
 
-    # 허프 변환 - 왼쪽 기울기 <0, 오른쪽 기울기 >0로 직선을 분류
+    # 3. 허프 변환을 통한 선 감지 및 분류:
     lines = cv2.HoughLinesP(masked_edges, 1, np.pi / 180, 40,
                             minLineLength=60,
-                            maxLineGap=150) # maxLineGap 150으로 조정
+                            maxLineGap=150) # maxLineGap 조정.
 
     left_lines, right_lines = [], []
-    if lines is not None:
-        for x1, y1, x2, y2 in lines[:, 0]:
-            slope = (y2 - y1) / (x2 - x1 + 1e-6) 
-            if -1.0 < slope < -0.1:
-                left_lines.append((x1, y1, x2, y2))
-            elif 0.1 < slope < 1.0:
-                right_lines.append((x1, y1, x2, y2))
+    # --- 가로선 무시 로직 및 기울기 기반 분류 ---
+    slope_threshold_min = 0.1 # 이 값보다 기울기 절대값이 작으면 수평선에 가깝다고 판단하여 무시.
+    slope_threshold_max = 10.0 # 이 값보다 기울기 절대값이 크면 너무 수직인 선으로 판단하여 무시.
 
-    # 디버깅: 검출된 선들을 영상에 그려서 확인
-    debug_frame_lines = frame.copy()
     if lines is not None:
+        # --- 디버깅: 감지된 전체 선의 개수 출력 ---
+        # print(f"Debug: HoughLinesP detected {len(lines)} raw lines.")
         for x1, y1, x2, y2 in lines[:, 0]:
-            cv2.line(debug_frame_lines, (x1, y1), (x2, y2), (0, 255, 255), 1)
+            # 수직선 방지 및 0으로 나누는 것 방지.
+            if x2 - x1 == 0:
+                slope = 999.0 # 매우 큰 값으로 설정하여 수직선으로 처리 (추후 필터링됨).
+            else:
+                slope = (y2 - y1) / (x2 - x1)
+            
+            # 기울기 필터링: 일정 기울기 이상 (수평선 무시) 및 너무 수직인 선 무시.
+            if abs(slope) < slope_threshold_min or abs(slope) > slope_threshold_max:
+                continue # 이 범위의 기울기는 차선으로 간주하지 않음.
+
+            if slope < -slope_threshold_min: # 왼쪽 차선 (음수 기울기).
+                left_lines.append((x1, y1, x2, y2))
+            elif slope > slope_threshold_min: # 오른쪽 차선 (양수 기울기).
+                right_lines.append((x1, y1, x2, y2))
+    
+    # --- 디버깅: 분류된 왼쪽/오른쪽 차선 개수 출력 ---
+    # print(f"Debug: Left lines after filtering: {len(left_lines)}, Right lines after filtering: {len(right_lines)}")
+
+    # --- 디버깅: 검출 및 분류된 선들을 영상에 그려서 확인 ---
+    debug_frame_lines = frame.copy()
     if left_lines:
         for x1, y1, x2, y2 in left_lines:
-            cv2.line(debug_frame_lines, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            cv2.line(debug_frame_lines, (x1, y1), (x2, y2), (255, 0, 0), 2) # 파란색 (왼쪽 차선).
     if right_lines:
         for x1, y1, x2, y2 in right_lines:
-            cv2.line(debug_frame_lines, (x1, y1), (x2, y2), (0, 0, 255), 2)
-    cv2.imshow("Detected and Classified Hough Lines", debug_frame_lines)
+            cv2.line(debug_frame_lines, (x1, y1), (x2, y2), (0, 0, 255), 2) # 빨간색 (오른쪽 차선).
+    cv2.imshow("Debug_6_Detected_and_Classified_Hough_Lines", debug_frame_lines)
 
 
+    # 4. 선들을 평균화하여 하나의 대표선으로 피팅:
     def average_line(lines):
         if not lines:
             return None
@@ -513,16 +160,22 @@ def create_trapezoid_roi(frame, y_bottom, y_top):
         for x1, y1, x2, y2 in lines:
             x += [x1, x2]
             y += [y1, y2]
-        if len(y) < 2:
+        if len(y) < 2: # 최소 2개 점이 있어야 피팅 가능.
             return None
-        return np.polyfit(y, x, deg=1)
+        return np.polyfit(y, x, deg=1) # 1차 함수로 피팅 (x = my + b 형태).
 
     left_fit = average_line(left_lines)
     right_fit = average_line(right_lines)
+    
+    # --- 디버깅: 피팅된 기울기/절편 값 출력 ---
+    # if left_fit is not None:
+    #     print(f"Debug: Left fit coefficients (slope, intercept): {left_fit}")
+    # if right_fit is not None:
+    #     print(f"Debug: Right fit coefficients (slope, intercept): {right_fit}")
 
-    # 이전 프레임의 차선 정보를 활용하여 ROI 안정화 (간단한 이동 평균)
-    global prev_left_fit_global, prev_right_fit_global # <<--- 이 줄!    
-    alpha = 0.85 # alpha 값 0.7로 조정
+    # 5. 이전 프레임의 차선 정보를 활용하여 ROI 안정화 (이동 평균):
+    global prev_left_fit_global, prev_right_fit_global
+    alpha = 0.85 # 이동 평균 가중치 (현재 프레임에 0.85, 이전 프레임에 0.15).
     if left_fit is not None:
         if prev_left_fit_global is not None:
             left_fit = alpha * left_fit + (1 - alpha) * prev_left_fit_global
@@ -533,187 +186,195 @@ def create_trapezoid_roi(frame, y_bottom, y_top):
         prev_right_fit_global = right_fit
 
     if left_fit is None or right_fit is None:
+        # --- 디버깅: 차선 피팅 실패 시 메시지 출력 ---
+        # print("Debug: Could not fit both left and right lanes. Returning None for ROI.")
         return None
     
-    lx1 = int(np.polyval(left_fit, y_bottom))
-    lx2 = int(np.polyval(left_fit, y_top))
-    rx1 = int(np.polyval(right_fit, y_bottom))
-    rx2 = int(np.polyval(right_fit, y_top))
+    # 6. 피팅된 선을 기준으로 ROI의 꼭짓점 계산:
+    lx1 = int(np.polyval(left_fit, y_bottom)) # 왼쪽 차선의 y_bottom 높이에서의 x 좌표.
+    lx2 = int(np.polyval(left_fit, y_top))    # 왼쪽 차선의 y_top 높이에서의 x 좌표.
+    rx1 = int(np.polyval(right_fit, y_bottom)) # 오른쪽 차선의 y_bottom 높이에서의 x 좌표.
+    rx2 = int(np.polyval(right_fit, y_top))    # 오른쪽 차선의 y_top 높이에서의 x 좌표.
 
-    # 디버깅: 최종 피팅된 차선으로 ROI가 어떻게 생성되는지 확인
+    # --- 디버깅: 최종 피팅된 차선으로 ROI가 어떻게 생성되는지 확인 ---
     debug_frame_roi_fit = frame.copy()
-    cv2.line(debug_frame_roi_fit, (lx1, y_bottom), (lx2, y_top), (255, 0, 0), 2)
-    cv2.line(debug_frame_roi_fit, (rx1, y_bottom), (rx2, y_top), (0, 0, 255), 2)
-    cv2.imshow("Final Fitted Lines for ROI Calculation", debug_frame_roi_fit)
+    cv2.line(debug_frame_roi_fit, (lx1, y_bottom), (lx2, y_top), (255, 0, 0), 2) # 파란색 (왼쪽).
+    cv2.line(debug_frame_roi_fit, (rx1, y_bottom), (rx2, y_top), (0, 0, 255), 2) # 빨간색 (오른쪽).
+    # cv2.imshow("Debug_7_Final_Fitted_Lines_for_ROI", debug_frame_roi_fit)
 
+    # 7. ROI 꼭짓점의 x 좌표가 이미지 범위를 벗어나지 않도록 클리핑:
     lx1 = np.clip(lx1, 0, width)
     lx2 = np.clip(lx2, 0, width)
     rx1 = np.clip(rx1, 0, width)
     rx2 = np.clip(rx2, 0, width)
     
+    # 8. 차선이 교차하거나 너무 가까워 유효하지 않은 경우 필터링:
     if lx1 >= rx1 or lx2 >= rx2:
         print("Warning: Detected lanes are crossing or too close for ROI creation. Skipping ROI.")
         return None
 
+    # 9. 최종 사다리꼴 ROI 꼭짓점 반환:
     return np.array([[
         (lx1, y_bottom), (lx2, y_top), (rx2, y_top), (rx1, y_bottom)
     ]], dtype=np.int32)
-# --- END: create_trapezoid_roi 함수 수정 ---
 
+# --- 9. ROI 높이 설정 (객체 감지 경고용) ---
+danger_bottom, danger_top = 360, 300  # 위험 영역의 이미지 Y좌표 (하단, 상단).
+warning_bottom, warning_top = 360, 260 # 경고 영역의 이미지 Y좌표 (하단, 상단).
 
-# ROI 높이 설정
-danger_bottom, danger_top = 360, 300
-warning_bottom, warning_top = 360, 260
+# --- 10. ROI 별 객체 포함 임계값 설정 ---
+danger_threshold = 0.2    # 객체 박스의 20% 이상이 위험 ROI에 포함되면 위험.
+warning_threshold = 0.3   # 객체 박스의 30% 이상이 경고 ROI에 포함되면 경고.
 
-# ROI 별 threshold 설정
-danger_threshold = 0.2    
-warning_threshold = 0.3
-
-# 거리 계산 함수
+# --- 11. 거리 계산 함수 ---
 def calculate_distance(vehicle_screen_width, vehicle_real_length):
+    # 핀홀 카메라 모델을 사용하여 객체까지의 거리를 추정합니다.
+    if vehicle_screen_width == 0: # 0으로 나누는 오류 방지.
+        return float('inf')
     return (focal_length * vehicle_real_length) / vehicle_screen_width
 
-# 트랙바 콜백 함수
+# --- 12. 트랙바 콜백 함수 ---
+# 트랙바 위치에 따라 동영상 재생 위치를 업데이트합니다.
 def update_video_position(val):
     cap.set(cv2.CAP_PROP_POS_FRAMES, val)
 
-# 트랙바 생성
+# --- 13. 메인 윈도우 생성 및 트랙바 추가 ---
 cv2.namedWindow('YOLOv8 ROI Detection')
 cv2.createTrackbar('Video Position', 'YOLOv8 ROI Detection', 0, video_length - 1, update_video_position)
 
-# FPS 측정을 위한 변수
+# --- 14. FPS 측정을 위한 변수 초기화 ---
 prev_frame_time = 0
 new_frame_time = 0
 
+# --- 15. 메인 비디오 처리 루프 ---
 while cap.isOpened():
-    ret, frame = cap.read()
+    ret, frame = cap.read() # 프레임 읽기.
     if not ret:
-        break
-    frame = cv2.resize(frame, (resize_width, resize_height))
+        break # 동영상 끝 또는 오류 발생 시 종료.
 
-    # 빈 마스크 생성 (객체 감지 필터링용 - 현재 프레임의 ROI 사용)
+    frame = cv2.resize(frame, (resize_width, resize_height)) # 프레임 리사이즈.
+
+    # --- 16. 객체 감지 필터링을 위한 ROI 마스크 생성 (현재 프레임 차선 기반) ---
     mask_danger = np.zeros((resize_height, resize_width), dtype=np.uint8)
     mask_warning = np.zeros((resize_height, resize_width), dtype=np.uint8)
 
-    # danger ROI 생성 (현재 프레임의 ROI)
+    # danger ROI 생성 및 마스크 채우기.
     current_danger_roi = create_trapezoid_roi(frame, danger_bottom, danger_top)
     if current_danger_roi is not None:
         cv2.fillPoly(mask_danger, [current_danger_roi], 255)
-        last_display_danger_roi = current_danger_roi # <<< 수정: 마지막 유효 ROI 업데이트
+        last_display_danger_roi = current_danger_roi # 유효한 ROI를 전역 변수에 저장.
+        # --- 디버깅: Danger ROI 생성 성공 메시지 ---
+        # print("Debug: Danger ROI created successfully.")
+    # else:
+        # print("Debug: Danger ROI creation failed for current frame.")
 
-    # warning ROI 생성 (현재 프레임의 ROI)
+    # warning ROI 생성 및 마스크 채우기.
     current_warning_roi = create_trapezoid_roi(frame, warning_bottom, warning_top)
     if current_warning_roi is not None:
         cv2.fillPoly(mask_warning, [current_warning_roi], 255)
-        # danger ROI와 겹치는 부분 제외 (마스크 빼기)
+        # danger ROI와 겹치는 부분 제외 (마스크 빼기).
         if current_danger_roi is not None:
             danger_mask_for_subtract = np.zeros((resize_height, resize_width), dtype=np.uint8)
             cv2.fillPoly(danger_mask_for_subtract, [current_danger_roi], 255)
             mask_warning = cv2.subtract(mask_warning, danger_mask_for_subtract)
-        last_display_warning_roi = current_warning_roi # <<< 수정: 마지막 유효 ROI 업데이트
-    elif current_danger_roi is not None and last_display_warning_roi is not None:
-        # Warning ROI 마스크를 Danger ROI 마스크가 겹치지 않게 만듦 (이전 Warning ROI를 기반으로)
-        # 이 로직은 inside_roi 함수에서 사용되는 마스크를 조정하는 부분입니다.
-        danger_mask_for_subtract = np.zeros((resize_height, resize_width), dtype=np.uint8)
-        cv2.fillPoly(danger_mask_for_subtract, [current_danger_roi], 255)
-        
-        temp_warning_mask = np.zeros((resize_height, resize_width), dtype=np.uint8)
-        # 주의: 이 시점의 mask_warning은 이미 current_warning_roi (None일 수 있음)로 초기화되어 있으므로,
-        # 여기서는 last_display_warning_roi를 사용해 일시 마스크를 만들고 danger를 는 방식이 더 안전합니다.
-        # 하지만 inside_roi는 이 마스크를 사용하므로, 만약 current_warning_roi가 None이면 이 mask_warning은 비어있어야 합니다.
-        # 아래 로직은 `current_warning_roi`가 None일 때, `last_display_warning_roi`가 있다고 해도,
-        # 실제로 warning ROI에 대한 탐지를 비활성화하고 싶다면 수정이 필요합니다.
-        # 현재는 이전에 정의된 `mask_warning`이 비어있을 가능성이 높습니다.
-        # 시각화와 탐지 마스크를 분리하는 것이 핵심입니다.
-        pass # 마스크에 대한 로직은 그대로 유지하고, 시각화만 last_display_roi를 사용합니다.
+        last_display_warning_roi = current_warning_roi # 유효한 ROI를 전역 변수에 저장.
+        # --- 디버깅: Warning ROI 생성 성공 메시지 ---
+        # print("Debug: Warning ROI created successfully.")
+    # else:
+        # print("Debug: Warning ROI creation failed for current frame.")
 
-
+    # --- 17. ROI 시각화를 위한 오버레이 프레임 준비 ---
     roi_overlay = frame.copy()
 
-    # <<< 수정: ROI 그리기 로직 - last_display_roi 사용 >>>
-    # Danger ROI 테두리: last_display_danger_roi가 있으면 그림
+    # --- 18. ROI 그리기 로직 (last_display_roi 사용) ---
+    # 차선 인식이 일시적으로 실패해도 이전에 성공한 ROI를 계속 그려줍니다.
     if last_display_danger_roi is not None:
-        cv2.polylines(roi_overlay, [last_display_danger_roi], isClosed=True, color=(0, 0, 255), thickness=3)
+        cv2.polylines(roi_overlay, [last_display_danger_roi], isClosed=True, color=(0, 0, 255), thickness=3) # 빨간색.
 
-    # Warning ROI 테두리: last_display_warning_roi가 있으면 그림
     if last_display_warning_roi is not None:
-        # Danger ROI와 겹치는 부분 제외 로직은 여전히 필요 (시각적 일관성을 위해)
+        # Warning ROI 테두리를 그릴 때 Danger ROI와 겹치지 않게 처리.
         if last_display_danger_roi is not None:
             warning_mask_draw = np.zeros((resize_height, resize_width), dtype=np.uint8)
-            cv2.fillPoly(warning_mask_draw, [last_display_warning_roi], 255) # last_display_warning_roi 사용
+            cv2.fillPoly(warning_mask_draw, [last_display_warning_roi], 255)
 
             danger_mask_draw = np.zeros((resize_height, resize_width), dtype=np.uint8)
-            cv2.fillPoly(danger_mask_draw, [last_display_danger_roi], 255) # last_display_danger_roi 사용
+            cv2.fillPoly(danger_mask_draw, [last_display_danger_roi], 255)
 
-            warning_mask_draw = cv2.subtract(warning_mask_draw, danger_mask_draw)
+            warning_mask_draw = cv2.subtract(warning_mask_draw, danger_mask_draw) # 겹치는 부분 제거.
 
+            # 윤곽선을 찾아 그립니다 (빼기 연산 후에는 윤곽선으로 그려야 깔끔).
             contours, _ = cv2.findContours(warning_mask_draw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for cnt in contours:
-                cv2.polylines(roi_overlay, [cnt], isClosed=True, color=(0, 255, 255), thickness=3)
+                cv2.polylines(roi_overlay, [cnt], isClosed=True, color=(0, 255, 255), thickness=3) # 노란색.
         else:
-            # Danger ROI가 없으면 Warning ROI 전체를 그림
+            # Danger ROI가 없으면 Warning ROI 전체를 그립니다.
             cv2.polylines(roi_overlay, [last_display_warning_roi], isClosed=True, color=(0, 255, 255), thickness=3)
-    # <<< 수정 끝 >>>
 
-    # 객체 탐지
+    # --- 19. 객체 탐지 (YOLOv8) ---
     results = model(frame)
-    boxes = results[0].boxes.xyxy.cpu().numpy()
-    classes = results[0].boxes.cls.cpu().numpy()
+    boxes = results[0].boxes.xyxy.cpu().numpy() # 바운딩 박스 좌표.
+    classes = results[0].boxes.cls.cpu().numpy() # 클래스 ID.
 
     for box, class_id in zip(boxes, classes):
         class_id = int(class_id)
         if class_id not in class_names:
-            continue
+            continue # 정의되지 않은 클래스 ID는 건너뛰기.
 
         x1, y1, x2, y2 = [int(c) for c in box]
         class_name = class_names[class_id]
 
-        # 객체 탐지 시 색 지정 - danger, warning 외
-        # 여기서는 current_danger_roi와 current_warning_roi를 사용하는 mask_danger, mask_warning을 사용하는 것이 맞습니다.
-        # (현재 차선이 감지된 경우에만 경고를 발생시켜야 하므로)
-        if inside_roi(box, mask_danger, danger_threshold): # mask_danger는 current_danger_roi 기반
-            color = (0, 0, 255) # 빨강 (Danger)
-        elif inside_roi(box, mask_warning, warning_threshold): # mask_warning은 current_warning_roi 기반
-            color = (0, 255, 255) # 노랑 (Warning)
+        # 객체가 ROI에 속하는지에 따라 색상 및 경고 메시지 결정.
+        # `mask_danger`, `mask_warning`은 `current_danger_roi`/`current_warning_roi` 기반입니다.
+        if inside_roi(box, mask_danger, danger_threshold):
+            color = (0, 0, 255) # 빨강 (위험).
+            # --- 디버깅: 객체가 위험 ROI에 진입 ---
+            # print(f"Debug: Object '{class_name}' entered DANGER ROI.")
+        elif inside_roi(box, mask_warning, warning_threshold):
+            color = (0, 255, 255) # 노랑 (경고).
+            # --- 디버깅: 객체가 경고 ROI에 진입 ---
+            # print(f"Debug: Object '{class_name}' entered WARNING ROI.")
         else:
-            color = (0, 255, 0) # 초록 (정상)
+            color = (0, 255, 0) # 초록 (정상).
 
-        # 차량의 화면 상 너비 계산
+        # 차량의 화면 상 너비 계산.
         vehicle_screen_width = x2 - x1
 
-        # 거리 계산 (차량에 대해서만 계산)
-        if class_id == 0 or class_id == 1:
-            vehicle_real_length_used = vehicle_real_length if class_id == 0 else big_vehicle_real_length 
+        # 거리 계산 (차량 클래스에 대해서만).
+        if class_id == 0 or class_id == 1: # "vehicle" 또는 "big vehicle".
+            vehicle_real_length_used = vehicle_real_length if class_id == 0 else big_vehicle_real_length
             
             if vehicle_screen_width > 0:
                 distance = calculate_distance(vehicle_screen_width, vehicle_real_length_used)
             else:
-                distance = float('inf')
+                distance = float('inf') # 화면 너비가 0이면 무한대 거리로 설정.
 
             cv2.putText(frame, f"Dis: {distance:.2f}[m]", (x1, y2 + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
 
+        # 바운딩 박스와 클래스/거리 텍스트 그리기.
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         cv2.putText(frame, class_name, (x1, y1 - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-    # FPS 계산
+    # --- 20. FPS 계산 및 화면 표시 ---
     new_frame_time = time.time()
     fps_value = 1 / (new_frame_time - prev_frame_time)
     prev_frame_time = new_frame_time
 
     cv2.putText(frame, f"FPS: {fps_value:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-    # 화면 표시
-    overlay = cv2.addWeighted(frame, 1.0, roi_overlay, 0.3, 0)
+    # --- 21. 최종 화면 표시 (원본 프레임과 ROI 오버레이 합치기) ---
+    overlay = cv2.addWeighted(frame, 1.0, roi_overlay, 0.3, 0) # 원본 프레임에 ROI를 투명하게 겹쳐 그림.
     cv2.imshow("YOLOv8 ROI Detection", overlay)
 
-    key = cv2.waitKey(delay) & 0xFF
-    if key == ord('q'):
+    # --- 22. 사용자 입력 처리 ---
+    key = cv2.waitKey(delay) & 0xFF # 'delay' 밀리초 동안 대기.
+    if key == ord('q'): # 'q' 키를 누르면 종료.
         break
-    elif key == 81: # 'Q' 키 (대문자)
+    elif key == ord('Q'): # 'Q' 키를 누르면 5초 뒤로 이동.
         cap.set(cv2.CAP_PROP_POS_MSEC, cap.get(cv2.CAP_PROP_POS_MSEC) - 5000)
-    elif key == 83: # 'S' 키 (대문자)
+    elif key == ord('S'): # 'S' 키를 누르면 5초 앞으로 이동.
         cap.set(cv2.CAP_PROP_POS_MSEC, cap.get(cv2.CAP_PROP_POS_MSEC) + 5000)
 
-cap.release()
-cv2.destroyAllWindows()
+# --- 23. 자원 해제 ---
+cap.release() # 비디오 캡처 객체 해제.
+cv2.destroyAllWindows() # 모든 OpenCV 창 닫기.
