@@ -13,4 +13,6 @@ File
 
 3. collsion_warning_rev2.py
    차선 인식에 따른 roi영역 설정 후 추돌 감지 
-      
+
+4. yolo_test
+    모델 테스트 코드
