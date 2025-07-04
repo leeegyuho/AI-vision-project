@@ -15,4 +15,9 @@ File
    차선 인식에 따른 roi영역 설정 후 추돌 감지 
 
 4. yolo_test
-    모델 테스트 코드
+  모델 테스트 코드
+
+5. client_rev1_250703.py, server_rev1_250703.py
+   python TCP/IP 통신-------FPS 낮음
+6. CC++_CONNECTING
+   C/C++ 통신
