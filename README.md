@@ -19,5 +19,6 @@ File
 
 5. client_rev1_250703.py, server_rev1_250703.py
    python TCP/IP 통신-------FPS 낮음
-6. CC++_CONNECTING
-   C/C++ 통신
+6. CC++_CONNECTING_rev2.cpp
+   C/C++ 통신 하였고 
+   FP32로하였음-- convert file yolo.py를 c언어로 바꾸는 것 
