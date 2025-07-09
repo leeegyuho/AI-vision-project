@@ -17,8 +17,9 @@ File
 4. yolo_test
   모델 테스트 코드
 
-5. client_rev1_250703.py, server_rev1_250703.py
+5. client_rev2_250709.py, server_rev1_250709.py
    python TCP/IP 통신-------FPS 낮음
-6. CC++_CONNECTING_rev2.cpp
+   경고, 위험 알림 추가 디자인
+7. CC++_CONNECTING_rev2.cpp
    C/C++ 통신 하였고 
    FP32로하였음-- convert file yolo.py를 c언어로 바꾸는 것 
