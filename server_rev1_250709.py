@@ -33,7 +33,7 @@ def estimate_distance(h, w, label):
         return -1
 
 # YOLO 모델 로드
-model = YOLO("/home/hkit/Desktop/model test result/yolov8_custom14_test 7_n_250625/weights/best.pt")
+model = YOLO("/home/hkit/Pictures/test/yolov8_custom14/weights/best.pt")
 #model.to('cuda')
 
 # ROI 및 FPS 관련 전역 변수 초기화
