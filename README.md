@@ -32,6 +32,7 @@ Train : test : val = 7 : 2 : 1
 (620ea : 196ea : 124ea)
 
 Result
+
     metrics/precision : 0.802
     metrics/recall : 0.701  
     metrics/mAP50  : 0.767  
