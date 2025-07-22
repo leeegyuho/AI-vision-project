@@ -23,11 +23,14 @@ File
    FP32로하였음-- convert file yolo.py를 c언어로 바꾸는 것 
 
 YOLOv8 커스텀 모델 선정
+
 CLASS
 vehicle, big vehicle, bike, human, animal, obstacle
+
 DATE 
 Train : test : val = 7 : 2 : 1
 (620ea : 196ea : 124ea)
+
 Result
     metrics/precision : 0.802
     metrics/recall : 0.701  
