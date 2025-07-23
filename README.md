@@ -24,36 +24,38 @@ File
 
 ＊YOLOv8 커스텀 모델 선정
 
-CLASS
+1. CLASS
+   
 vehicle, big vehicle, bike, human, animal, obstacle
 
-DATE 
-Train : test : val = 7 : 2 : 1
-(620ea : 196ea : 124ea)
+3. DATE
+   
+   Train : test : val = 7 : 2 : 1
+   (620ea : 196ea : 124ea)
 
-Result
+   Result
 
     metrics/precision : 0.802
     metrics/recall : 0.701  
     metrics/mAP50  : 0.767  
     metrics/mAP50-95: 0.483
 
-문제점    
-데이터 중복으로 인한 과적합
-사람인식 오류
-bike, human 객체 인식 혼동
-가깝거나 멀어지면 인식 안됌
-빌딩을 bike나 vehicle로 인식
+5. 문제점    
+   데이터 중복으로 인한 과적합
+   사람인식 오류
+   bike, human 객체 인식 혼동
+   가깝거나 멀어지면 인식 안됌
+   빌딩을 bike나 vehicle로 인식
 
-해결방안
-한 사진에서 여러 클래스 라벨링(중복데이터 제거)
-저화질이거나 애매한 사진 제거 
-양질의 데이터 추가 (각 클래스)
-bike의 경우 bike만 라벨링
-클래스 간소화(8개 -> 6개)
+6. 해결방안
+   한 사진에서 여러 클래스 라벨링(중복데이터 제거)
+   저화질이거나 애매한 사진 제거 
+   양질의 데이터 추가 (각 클래스)
+   bike의 경우 bike만 라벨링
+   클래스 간소화(8개 -> 6개)
 
 
-＊차선 인식 및 추돌 감지
+＊차선 인식 및 추돌 감지＊
 
 OpenCV로 영상처리
 1.주요 기능
