@@ -22,7 +22,7 @@ File
    C/C++ 통신 하였고 
    FP32로하였음-- convert file yolo.py를 c언어로 바꾸는 것 
 
-YOLOv8 커스텀 모델 선정
+＊YOLOv8 커스텀 모델 선정
 
 CLASS
 vehicle, big vehicle, bike, human, animal, obstacle
@@ -53,6 +53,27 @@ bike의 경우 bike만 라벨링
 클래스 간소화(8개 -> 6개)
 
 
-차선 인식 및 추돌 감지
+＊차선 인식 및 추돌 감지
 
 OpenCV로 영상처리
+1.주요 기능
+
+차선 인식
+:캐니 엣지, 히스토그램, HSV, 가중치(7:3),ROI, HoughlinesP, Average_line, Slope(기울기에 따라 왼쪽, 오른쪽 차선)
+
+추돌 감지
+: 차선인식에 따른 WARNING, DANGER 영역 설정 
+
+차간 거리
+: 초점거리 600, 실제 객체 높이, 너비는 임의로 지정 -> 높이, 너비에 따라서 차간 거리 더함 / 2
+
+2. 통신
+   카메라-96보드-데스크탑
+   TCP/IP
+   카메라에서 96보드와 USB연결로 영상받는 걸로 가정
+   
+   멀티스레드 : 한개는 영상 받음, 한개는 영상 데스크탑으로 전송
+
+   JPEG로 인코딩 후 데스크탑에서 디코딩하고 WARNING, DANGER에서 감지되는 객체만 JSON으로 데이터 전송
+
+ROS2로 통신한 것은 ROS2 Reposit에 있음.
