@@ -40,14 +40,16 @@ vehicle, big vehicle, bike, human, animal, obstacle
     metrics/mAP50  : 0.767  
     metrics/mAP50-95: 0.483
 
-5. 문제점    
+5. 문제점
+   
    데이터 중복으로 인한 과적합
    사람인식 오류
    bike, human 객체 인식 혼동
    가깝거나 멀어지면 인식 안됌
    빌딩을 bike나 vehicle로 인식
 
-6. 해결방안
+7. 해결방안
+   
    한 사진에서 여러 클래스 라벨링(중복데이터 제거)
    저화질이거나 애매한 사진 제거 
    양질의 데이터 추가 (각 클래스)
