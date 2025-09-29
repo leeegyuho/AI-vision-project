@@ -81,3 +81,5 @@ OpenCV로 영상처리
    JPEG로 인코딩 후 데스크탑에서 디코딩하고 WARNING, DANGER에서 감지되는 객체만 JSON으로 데이터 전송
 
 ※ ROS2로 통신한 것은 ROS2_ Reposit에 있음. 프로그램 구현시 각 카메라 위치, 구도에 따라 다르기때문에 튜닝 필요함.
+<img width="1347" height="740" alt="image" src="https://github.com/user-attachments/assets/97e47e8b-023e-4ad6-b9fb-589525e59cce" />
+
