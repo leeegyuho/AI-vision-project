@@ -84,6 +84,8 @@ OpenCV로 영상처리
 
 <img width="1326" height="656" alt="image" src="https://github.com/user-attachments/assets/06209951-debd-4544-b4bc-984d8eaa53e8" />
 
+<img width="1287" height="648" alt="image" src="https://github.com/user-attachments/assets/c480fbd3-ced2-4398-a0a7-c5c045cf93a7" />
+
 <img width="1346" height="535" alt="image" src="https://github.com/user-attachments/assets/5aae8472-d194-433e-84d2-3bf1182e03ef" />
 
 
